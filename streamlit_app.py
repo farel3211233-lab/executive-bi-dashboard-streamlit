@@ -23,15 +23,74 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-      .stApp {background: radial-gradient(ellipse at 10% 0%, #172554 0, #0f172a 38%);}
-      [data-testid="stMetric"] {background:#1e293b;border:1px solid #334155;
-        padding:16px 18px;border-radius:14px;}
-      [data-testid="stMetricLabel"] {color:#94a3b8;}
-      [data-testid="stMetricValue"] {color:#e2e8f0;}
-      section[data-testid="stSidebar"] {background:#111c2e;}
-      h1,h2,h3 {letter-spacing:-.025em;}
-      div[data-testid="stExpander"] {background:#1e293b;border-radius:12px;}
-      .small-note {color:#94a3b8;font-size:.88rem;}
+      :root {
+        --ink: #252044;
+        --muted: #6f6b89;
+        --purple: #7c3aed;
+        --cyan: #0891b2;
+        --coral: #f45b85;
+        --line: #e9e4f7;
+        --card: rgba(255,255,255,.88);
+      }
+      .stApp {
+        color:var(--ink);
+        background:
+          radial-gradient(ellipse at 4% 0%, rgba(251,207,232,.58), transparent 31%),
+          radial-gradient(ellipse at 96% 4%, rgba(165,243,252,.55), transparent 29%),
+          linear-gradient(145deg,#fffaf4 0%,#f7f4ff 52%,#effbff 100%);
+      }
+      [data-testid="stHeader"] {background:rgba(255,255,255,.56);}
+      [data-testid="stAppViewContainer"] {background:transparent;}
+      section.main > div {max-width:1500px;padding-top:2rem;padding-bottom:3rem;}
+      section[data-testid="stSidebar"] {
+        background:linear-gradient(180deg,#f3eefe 0%,#f2f8ff 100%);
+        border-right:1px solid rgba(139,92,246,.13);
+      }
+      section[data-testid="stSidebar"] * {color:var(--ink);}
+      h1,h2,h3 {color:var(--ink);letter-spacing:-.035em;}
+      h1 {
+        background:linear-gradient(95deg,#6d28d9 0%,#0891b2 54%,#f45b85 100%);
+        -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
+        font-weight:850;
+      }
+      [data-testid="stMetric"] {
+        background:var(--card);border:1px solid var(--line);box-shadow:0 12px 30px rgba(74,52,125,.08);
+        padding:18px 20px;border-radius:20px;backdrop-filter:blur(10px);
+      }
+      [data-testid="stMetricLabel"] {color:var(--muted);font-weight:650;}
+      [data-testid="stMetricValue"] {color:var(--ink);font-weight:800;}
+      [data-testid="stMetricDelta"] {font-weight:650;}
+      [data-testid="stVerticalBlockBorderWrapper"] {
+        background:rgba(255,255,255,.72);border-color:var(--line)!important;
+        border-radius:22px;box-shadow:0 12px 32px rgba(74,52,125,.06);
+      }
+      div[data-testid="stExpander"] {
+        background:rgba(255,255,255,.78);border:1px solid var(--line);
+        border-radius:16px;box-shadow:0 8px 24px rgba(74,52,125,.05);
+      }
+      div[data-testid="stAlert"] {border-radius:16px;}
+      [data-testid="stFileUploaderDropzone"] {
+        background:rgba(255,255,255,.76);border:1.5px dashed #a78bfa;border-radius:18px;
+      }
+      [data-testid="stFileUploaderDropzone"]:hover {border-color:#7c3aed;background:#faf7ff;}
+      div[data-baseweb="select"] > div {
+        background:rgba(255,255,255,.92);border-color:#ded7f2;border-radius:12px;
+      }
+      .stButton > button,.stDownloadButton > button {
+        color:#fff;background:linear-gradient(110deg,#7c3aed,#0891b2);
+        border:0;border-radius:999px;font-weight:700;box-shadow:0 7px 18px rgba(124,58,237,.2);
+        transition:transform .18s ease,box-shadow .18s ease;
+      }
+      .stButton > button:hover,.stDownloadButton > button:hover {
+        color:#fff;border:0;transform:translateY(-2px);box-shadow:0 11px 24px rgba(124,58,237,.28);
+      }
+      [data-testid="stDataFrame"] {border:1px solid var(--line);border-radius:16px;overflow:hidden;}
+      hr {border-color:var(--line);}
+      .small-note {color:var(--muted);font-size:.9rem;}
+      @media (max-width: 700px) {
+        section.main > div {padding-top:1rem;}
+        [data-testid="stMetric"] {padding:14px;border-radius:16px;}
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -221,16 +280,16 @@ def make_radar(frame: pd.DataFrame, metrics: list[str], group_col: str | None,
         fig.add_trace(go.Scatterpolar(
             r=values + values[:1],
             theta=[label(metric) for metric in metrics] + [label(metrics[0])],
-            fill="toself", name="Semua data", line_color="#22d3ee", opacity=.78,
+            fill="toself", name="Semua data", line_color="#7c3aed", opacity=.78,
         ))
 
     fig.update_layout(
-        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+        template="plotly_white", paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)", height=390,
         polar={"bgcolor": "rgba(0,0,0,0)",
-               "radialaxis": {"visible": True, "range": [0, 100], "gridcolor": "#334155"},
-               "angularaxis": {"gridcolor": "#334155"}},
-        legend={"orientation": "h", "y": -0.15},
+               "radialaxis": {"visible": True, "range": [0, 100], "gridcolor": "#e6e0f2"},
+               "angularaxis": {"gridcolor": "#e6e0f2"}},
+        legend={"orientation": "h", "y": -0.15, "font": {"color": "#3f3b5e"}},
         margin={"l": 35, "r": 35, "t": 20, "b": 20},
     )
     return fig
@@ -301,16 +360,16 @@ def make_regression_3d(frame: pd.DataFrame, target: str, features: list[str],
                        f"Aktual {label(target)}: %{{z:.2f}}<extra></extra>"),
     ))
     fig.update_layout(
-        template="plotly_dark", height=620,
+        template="plotly_white", height=620,
         title=f"Permukaan OLS 3D · R² {model['r2'] * 100:.2f}%",
         scene={
             "xaxis_title": label(x_feature),
             "yaxis_title": label(y_feature),
             "zaxis_title": label(target),
-            "bgcolor": "rgba(0,0,0,0)",
-            "xaxis": {"gridcolor": "#334155"},
-            "yaxis": {"gridcolor": "#334155"},
-            "zaxis": {"gridcolor": "#334155"},
+            "bgcolor": "rgba(255,255,255,.45)",
+            "xaxis": {"gridcolor": "#e6e0f2"},
+            "yaxis": {"gridcolor": "#e6e0f2"},
+            "zaxis": {"gridcolor": "#e6e0f2"},
         },
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         margin={"l": 10, "r": 25, "t": 65, "b": 10},
@@ -657,15 +716,15 @@ with bar_col:
     if factor_cols:
         correlations = data[numeric_cols].corr()[target].drop(labels=[target], errors="ignore").fillna(0)
         ranked = correlations.reindex(correlations.abs().sort_values(ascending=True).index)
-        colors = ["#38bdf8" if value >= 0 else "#fb7185" for value in ranked.values]
+        colors = ["#8b5cf6" if value >= 0 else "#f45b85" for value in ranked.values]
         bar = go.Figure(go.Bar(
             x=ranked.values, y=[label(column) for column in ranked.index],
             orientation="h", marker_color=colors,
             hovertemplate="%{y}<br>r = %{x:.3f}<extra></extra>",
         ))
         bar.update_layout(
-            template="plotly_dark", title=f"Ranking korelasi terhadap {label(target)}",
-            xaxis={"range": [-1, 1], "title": "Korelasi Pearson", "gridcolor": "#334155"},
+            template="plotly_white", title=f"Ranking korelasi terhadap {label(target)}",
+            xaxis={"range": [-1, 1], "title": "Korelasi Pearson", "gridcolor": "#e6e0f2"},
             yaxis={"gridcolor": "rgba(0,0,0,0)"}, height=max(360, 35 * len(ranked)),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             margin={"l": 10, "r": 15, "t": 60, "b": 35},
@@ -684,7 +743,8 @@ with scatter_col:
         )
         scatter = go.Figure(go.Scatter(
             x=data[factor], y=data[target], mode="markers",
-            marker={"color": "#22d3ee", "opacity": .78, "size": 9},
+            marker={"color": "#06b6d4", "opacity": .82, "size": 9,
+                    "line": {"color": "#fff", "width": 1}},
             customdata=np.arange(len(data)),
             hovertemplate=f"{label(factor)}: %{{x}}<br>{label(target)}: %{{y}}<extra></extra>",
         ))
@@ -694,12 +754,12 @@ with scatter_col:
             x_line = np.linspace(float(valid_xy[factor].min()), float(valid_xy[factor].max()), 50)
             scatter.add_trace(go.Scatter(
                 x=x_line, y=slope * x_line + intercept, mode="lines", name="Tren linear",
-                line={"color": "#fbbf24", "dash": "dash"},
+                line={"color": "#f45b85", "dash": "dash", "width": 3},
                 hovertemplate="Garis tren<extra></extra>",
             ))
         scatter.update_layout(
-            template="plotly_dark", xaxis={"title": label(factor), "gridcolor": "#334155"},
-            yaxis={"title": label(target), "gridcolor": "#334155"},
+            template="plotly_white", xaxis={"title": label(factor), "gridcolor": "#e6e0f2"},
+            yaxis={"title": label(target), "gridcolor": "#e6e0f2"},
             height=390, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             margin={"l": 10, "r": 15, "t": 25, "b": 35},
         )
@@ -714,13 +774,13 @@ if len(numeric_cols) >= 2:
         z=corr_matrix.values,
         x=[label(column) for column in numeric_cols],
         y=[label(column) for column in numeric_cols],
-        colorscale=[[0, "#fb7185"], [.5, "#1e293b"], [1, "#38bdf8"]],
+        colorscale=[[0, "#fb7185"], [.5, "#f4f0ff"], [1, "#22d3ee"]],
         zmin=-1, zmax=1, text=np.round(corr_matrix.values, 2), texttemplate="%{text:.2f}",
         hovertemplate="%{y} × %{x}<br>r = %{z:.3f}<extra></extra>",
         colorbar={"title": "r"},
     ))
     heat.update_layout(
-        template="plotly_dark", height=max(430, 35 * len(numeric_cols)),
+        template="plotly_white", height=max(430, 35 * len(numeric_cols)),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         margin={"l": 15, "r": 15, "t": 20, "b": 20},
     )
