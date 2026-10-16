@@ -3,32 +3,30 @@ from __future__ import annotations
 from pathlib import Path
 import base64
 import gzip
+import hashlib
 import io
 import json
+import re
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+
 BASE_DIR = Path(__file__).resolve().parent
 CSV_CANDIDATES = [
     BASE_DIR / "latihan1.csv",
     Path(r"D:\MataKuliah\makul semester 5\business intelegensi\latihan1.csv"),
 ]
-COLUMNS = [
+STUDENT_COLUMNS = [
     "Student_ID", "Gender", "Age", "Study_Hours", "Sleep_Hours",
     "Attendance", "Exam_Score", "Monthly_Spending", "Screen_Hours",
     "Satisfaction",
 ]
-FEATURES = ["Study_Hours", "Attendance", "Sleep_Hours", "Screen_Hours"]
-LABELS = {
-    "Student_ID": "Student ID", "Gender": "Gender", "Age": "Age",
-    "Study_Hours": "Study Hours", "Sleep_Hours": "Sleep Hours",
-    "Attendance": "Attendance", "Exam_Score": "Exam Score",
-    "Monthly_Spending": "Monthly Spending", "Screen_Hours": "Screen Hours",
-    "Satisfaction": "Satisfaction",
-}
+STUDENT_FEATURES = ["Study_Hours", "Attendance", "Sleep_Hours", "Screen_Hours"]
+ALL_VALUES = "__ALL_VALUES__"
+MISSING_VALUE = "__MISSING_VALUE__"
 
 st.set_page_config(
     page_title="Executive BI Dashboard",
@@ -47,6 +45,7 @@ st.markdown(
       section[data-testid="stSidebar"] {background:#111c2e;}
       h1,h2,h3 {letter-spacing:-.025em;}
       div[data-testid="stExpander"] {background:#1e293b;border-radius:12px;}
+      .small-note {color:#94a3b8;font-size:.88rem;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -54,6 +53,7 @@ st.markdown(
 
 
 def generate_dummy_data(rows: int = 100) -> pd.DataFrame:
+    """Create the original student example used when no source file exists."""
     rng = np.random.default_rng(42)
     gender = rng.choice(["F", "M"], size=rows)
     age = rng.integers(17, 25, rows)
@@ -75,88 +75,224 @@ def generate_dummy_data(rows: int = 100) -> pd.DataFrame:
         "Study_Hours": study, "Sleep_Hours": sleep, "Attendance": attendance,
         "Exam_Score": exam, "Monthly_Spending": spending,
         "Screen_Hours": screen, "Satisfaction": satisfaction,
-    }, columns=COLUMNS)
+    }, columns=STUDENT_COLUMNS)
 
 
 def prepare_data(frame: pd.DataFrame) -> pd.DataFrame:
+    """Clean column labels and empty records without requiring a student schema."""
     frame = frame.copy()
-    frame.columns = [str(c).strip() for c in frame.columns]
-    missing = [c for c in COLUMNS if c not in frame.columns]
-    if missing:
-        raise ValueError("Kolom CSV tidak lengkap: " + ", ".join(missing))
-    frame = frame[COLUMNS]
-    frame["Gender"] = frame["Gender"].astype(str).str.strip().str.upper()
-    for col in COLUMNS:
-        if col != "Gender":
-            frame[col] = pd.to_numeric(frame[col], errors="coerce")
-    return frame.dropna(subset=COLUMNS).reset_index(drop=True)
+    frame.columns = [str(column).strip() for column in frame.columns]
+    if len(frame.columns) == 0:
+        raise ValueError("CSV tidak memiliki kolom.")
+    if any(not column for column in frame.columns):
+        raise ValueError("Nama kolom tidak boleh kosong.")
+    duplicates = frame.columns[frame.columns.duplicated()].tolist()
+    if duplicates:
+        raise ValueError("Nama kolom duplikat: " + ", ".join(map(str, duplicates)))
+    frame = frame.dropna(axis=0, how="all").dropna(axis=1, how="all")
+    if frame.empty:
+        return frame.reset_index(drop=True)
+    # Infinities break summary statistics and OLS; treat them like missing values.
+    numeric_cols = frame.select_dtypes(include="number").columns
+    if len(numeric_cols):
+        frame[numeric_cols] = frame[numeric_cols].replace([np.inf, -np.inf], np.nan)
+    return frame.reset_index(drop=True)
+
+
+def read_uploaded_csv(uploaded_file) -> pd.DataFrame:
+    """Read a CSV upload with common encodings and delimiter inference."""
+    content = uploaded_file.getvalue()
+    errors = []
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin1"):
+        try:
+            return prepare_data(pd.read_csv(
+                io.BytesIO(content), encoding=encoding, sep=None, engine="python"
+            ))
+        except Exception as exc:  # Try the next likely encoding before reporting.
+            errors.append(exc)
+    raise ValueError(f"CSV tidak dapat dibaca. Periksa delimiter dan isinya. ({errors[-1]})")
 
 
 def read_js_data(path: Path) -> pd.DataFrame:
-    """Decode the gzip+Base64 CSV string produced by convert_csv_to_js.py."""
+    """Decode the gzip+Base64 CSV stored by convert_csv_to_js.py."""
     text = path.read_text(encoding="utf-8").strip()
     prefix = "window.STUDENT_DATA_GZIP_B64 = "
     if not text.startswith(prefix) or not text.endswith(";"):
         raise ValueError("Format student_data.js tidak dikenali.")
     encoded = json.loads(text[len(prefix):-1])
     csv_bytes = gzip.decompress(base64.b64decode(encoded))
-    return pd.read_csv(io.BytesIO(csv_bytes))
+    return prepare_data(pd.read_csv(io.BytesIO(csv_bytes)))
+
 
 def load_default_data() -> tuple[pd.DataFrame, str]:
     js_path = BASE_DIR / "student_data.js"
     if js_path.is_file():
-        return prepare_data(read_js_data(js_path)), f"JavaScript data: {js_path.name}"
+        return read_js_data(js_path), f"Data contoh ({js_path.name})"
     for path in CSV_CANDIDATES:
         if path.is_file():
-            return prepare_data(pd.read_csv(path)), str(path)
+            return prepare_data(pd.read_csv(path)), f"Data contoh ({path.name})"
     return generate_dummy_data(), "Data dummy otomatis (100 baris)"
 
 
-def fit_ols(frame: pd.DataFrame) -> dict:
-    usable = frame[FEATURES + ["Exam_Score"]].dropna()
-    if len(usable) < len(FEATURES) + 1:
-        return {"intercept": 0.0, "coefficients": dict.fromkeys(FEATURES, 0.0),
-                "r2": 0.0, "n": len(usable)}
-    x = usable[FEATURES].to_numpy(float)
-    y = usable["Exam_Score"].to_numpy(float)
+def label(column: str) -> str:
+    """Make arbitrary CSV column names friendlier in dashboard labels."""
+    return str(column).replace("_", " ").strip()
+
+
+def is_identifier(column: str, series: pd.Series) -> bool:
+    """Heuristic used only to keep ID-like fields out of default predictors."""
+    name = str(column).strip().lower()
+    if re.search(r"(^id$|(?:^|[_\s])id$|uuid|(^|[_\s])kode$|(^|[_\s])nomor$)", name):
+        return True
+    unique = series.nunique(dropna=True)
+    return len(series) > 5 and unique >= .95 * len(series)
+
+
+def choose_default_target(frame: pd.DataFrame, numeric_cols: list[str]) -> str:
+    """Prefer a recognizable outcome column; otherwise choose the last non-ID number."""
+    if "Exam_Score" in numeric_cols:
+        return "Exam_Score"
+    target_hints = (
+        "target", "label", "outcome", "response", "score", "sold", "sales",
+        "revenue", "profit", "income", "price", "amount", "quantity",
+        "units", "satisfaction", "total", "value",
+    )
+    normalized = {column: str(column).strip().lower() for column in numeric_cols}
+    for hint in target_hints:
+        matches = [column for column in numeric_cols if hint in normalized[column]]
+        if matches:
+            return matches[-1]
+    non_ids = [column for column in numeric_cols if not is_identifier(column, frame[column])]
+    return non_ids[-1] if non_ids else numeric_cols[-1]
+
+
+def categorical_columns(frame: pd.DataFrame, max_unique: int | None = None) -> list[str]:
+    columns = []
+    for column in frame.columns:
+        if pd.api.types.is_numeric_dtype(frame[column]):
+            continue
+        count = frame[column].nunique(dropna=True)
+        if count == 0 or (max_unique is not None and count > max_unique):
+            continue
+        columns.append(column)
+    return columns
+
+
+def encode_features(frame: pd.DataFrame, features: list[str], design_columns=None) -> pd.DataFrame:
+    """Encode selected numeric and categorical predictors into an OLS design."""
+    if not features:
+        result = pd.DataFrame(index=frame.index)
+        return result if design_columns is None else result.reindex(columns=design_columns, fill_value=0.0)
+
+    raw = frame[features].copy()
+    categorical = []
+    for column in features:
+        if pd.api.types.is_numeric_dtype(raw[column]):
+            raw[column] = pd.to_numeric(raw[column], errors="coerce")
+        else:
+            categorical.append(column)
+            raw[column] = raw[column].astype("string").fillna("(Kosong)").astype(str)
+
+    if categorical:
+        encoded = pd.get_dummies(raw, columns=categorical, drop_first=True, dtype=float)
+    else:
+        encoded = raw
+    encoded = encoded.astype(float)
+    if design_columns is not None:
+        encoded = encoded.reindex(columns=design_columns, fill_value=0.0)
+    return encoded
+
+
+def fit_ols(frame: pd.DataFrame, target: str, features: list[str]) -> dict:
+    """Fit an ordinary-least-squares model with one-hot categorical predictors."""
+    columns = [target, *features]
+    usable = frame[columns].copy()
+    usable[target] = pd.to_numeric(usable[target], errors="coerce")
+    usable = usable.replace([np.inf, -np.inf], np.nan).dropna(subset=[target])
+    for feature in features:
+        if pd.api.types.is_numeric_dtype(usable[feature]):
+            usable[feature] = pd.to_numeric(usable[feature], errors="coerce")
+    usable = usable.dropna(subset=[feature for feature in features
+                                   if pd.api.types.is_numeric_dtype(frame[feature])])
+    if usable.empty:
+        return {"error": "Tidak ada baris lengkap untuk melatih model.", "n": 0}
+
+    encoded = encode_features(usable, features)
+    y = usable[target].to_numpy(dtype=float)
+    design_columns = list(encoded.columns)
+    x = encoded.to_numpy(dtype=float)
     design = np.column_stack([np.ones(len(x)), x])
     beta, *_ = np.linalg.lstsq(design, y, rcond=None)
     prediction = design @ beta
-    total = float(np.sum((y - y.mean()) ** 2))
     residual = float(np.sum((y - prediction) ** 2))
-    r2 = 1 - residual / total if total else 0.0
+    total = float(np.sum((y - y.mean()) ** 2))
+    if total <= np.finfo(float).eps:
+        r2 = 1.0 if residual <= np.finfo(float).eps else 0.0
+    else:
+        r2 = 1 - residual / total
     return {
         "intercept": float(beta[0]),
-        "coefficients": dict(zip(FEATURES, map(float, beta[1:]))),
-        "r2": max(0.0, min(1.0, r2)),
+        "coefficients": dict(zip(design_columns, map(float, beta[1:]))),
+        "design_columns": design_columns,
+        "features": features,
+        "r2": float(r2),
         "n": len(usable),
+        "design_width": design.shape[1],
     }
 
 
-def make_radar(full: pd.DataFrame) -> go.Figure:
-    metrics = ["Exam_Score", "Study_Hours", "Attendance", "Sleep_Hours", "Satisfaction"]
-    maximum = {"Exam_Score": 100, "Study_Hours": 20, "Attendance": 100,
-               "Sleep_Hours": 12, "Satisfaction": 10}
+def make_radar(frame: pd.DataFrame, metrics: list[str], group_col: str | None,
+               groups: list[str]) -> go.Figure:
+    """Compare normalized metric profiles for selected categories or all rows."""
     fig = go.Figure()
-    for gender, name, color in [("F", "Female (F)", "#22d3ee"),
-                                ("M", "Male (M)", "#a78bfa")]:
-        group = full[full.Gender == gender]
-        values = [
-            float(group[m].mean()) * 100 / maximum[m] if len(group) else 0
-            for m in metrics
-        ]
+    if not metrics:
+        return fig
+
+    source = frame.copy()
+    lower = source[metrics].min()
+    upper = source[metrics].max()
+
+    def normalized(values: pd.Series) -> list[float]:
+        output = []
+        for metric in metrics:
+            span = float(upper[metric] - lower[metric])
+            if not np.isfinite(span) or span == 0:
+                output.append(50.0)
+            else:
+                output.append(float(np.clip((values[metric] - lower[metric]) / span * 100, 0, 100)))
+        return output
+
+    if group_col and groups:
+        group_values = source[group_col].astype("string").fillna("(Kosong)").astype(str)
+        for index, group in enumerate(groups):
+            subset = source[group_values == group]
+            if subset.empty:
+                continue
+            means = subset[metrics].mean(numeric_only=True)
+            values = normalized(means)
+            fig.add_trace(go.Scatterpolar(
+                r=values + values[:1],
+                theta=[label(metric) for metric in metrics] + [label(metrics[0])],
+                fill="toself", name=f"{group} (n={len(subset)})",
+                opacity=.78,
+            ))
+    else:
+        means = source[metrics].mean(numeric_only=True)
+        values = normalized(means)
         fig.add_trace(go.Scatterpolar(
             r=values + values[:1],
-            theta=[LABELS[m] for m in metrics] + [LABELS[metrics[0]]],
-            fill="toself", name=name, line_color=color, opacity=.8,
+            theta=[label(metric) for metric in metrics] + [label(metrics[0])],
+            fill="toself", name="Semua data", line_color="#22d3ee", opacity=.78,
         ))
+
     fig.update_layout(
         template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)", height=390,
-        polar={"bgcolor":"rgba(0,0,0,0)",
-               "radialaxis":{"visible":True,"range":[0,100],"gridcolor":"#334155"},
-               "angularaxis":{"gridcolor":"#334155"}},
-        legend={"orientation":"h","y":-0.15}, margin={"l":35,"r":35,"t":20,"b":20},
+        polar={"bgcolor": "rgba(0,0,0,0)",
+               "radialaxis": {"visible": True, "range": [0, 100], "gridcolor": "#334155"},
+               "angularaxis": {"gridcolor": "#334155"}},
+        legend={"orientation": "h", "y": -0.15},
+        margin={"l": 35, "r": 35, "t": 20, "b": 20},
     )
     return fig
 
@@ -165,178 +301,363 @@ def fmt(value: float, digits: int = 2) -> str:
     return f"{value:,.{digits}f}"
 
 
+def number_step(low: float, high: float) -> float:
+    span = abs(high - low)
+    if span == 0:
+        return 1.0
+    magnitude = 10 ** np.floor(np.log10(span) - 1)
+    return float(max(magnitude, np.finfo(float).eps))
+
+
+def prediction_controls(frame: pd.DataFrame, features: list[str], data_token: str) -> dict:
+    """Render a live What-If control for each selected predictor."""
+    values = {}
+    if not features:
+        st.info("Pilih minimal satu prediktor agar simulator dapat mengubah input.")
+        return values
+
+    control_columns = st.columns(2)
+    for index, feature in enumerate(features):
+        series = frame[feature]
+        widget_key = f"sim_{data_token}_{index}_{feature}"
+        with control_columns[index % 2]:
+            if pd.api.types.is_numeric_dtype(series):
+                numeric = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+                if numeric.empty:
+                    st.caption(f"{label(feature)}: tidak ada nilai numerik valid")
+                    values[feature] = 0.0
+                    continue
+                low, high = float(numeric.min()), float(numeric.max())
+                default = float(numeric.mean())
+                if low == high:
+                    st.caption(f"{label(feature)}: konstan pada {fmt(low)}")
+                    values[feature] = low
+                else:
+                    step = number_step(low, high)
+                    values[feature] = st.slider(
+                        label(feature), min_value=low, max_value=high,
+                        value=float(np.clip(default, low, high)), step=step, key=widget_key,
+                    )
+            else:
+                choices = series.astype("string").fillna("(Kosong)").astype(str).value_counts().index.tolist()
+                if not choices:
+                    values[feature] = "(Kosong)"
+                    st.caption(f"{label(feature)}: tidak ada kategori")
+                else:
+                    default = choices[0]
+                    values[feature] = st.selectbox(
+                        label(feature), choices,
+                        index=0, key=widget_key,
+                        help=f"Nilai paling umum: {default}",
+                    )
+    return values
+
+
+def show_data_table(frame: pd.DataFrame, source: str, key: str) -> None:
+    st.subheader("Tabel Data Interaktif")
+    search = st.text_input("Cari baris atau nilai", placeholder="Ketik kata kunci...", key=f"search_{key}")
+    display_data = frame.copy()
+    if search:
+        mask = display_data.astype("string").apply(
+            lambda column: column.str.contains(search, case=False, regex=False, na=False)
+        ).any(axis=1)
+        display_data = display_data[mask]
+    st.caption(f"{len(display_data)} dari {len(frame)} baris ditampilkan · sumber: {source}")
+    st.dataframe(display_data, hide_index=True, width="stretch")
+    st.download_button(
+        "Unduh CSV hasil filter", data=display_data.to_csv(index=False).encode("utf-8-sig"),
+        file_name="dashboard_data.csv", mime="text/csv", key=f"download_{key}",
+    )
+
+
 with st.sidebar:
     st.title("📊 Executive BI")
-    gender_choice = st.selectbox(
-        "Filter Gender", ["Semua", "F", "M"],
-        format_func=lambda x: {"Semua":"Semua gender","F":"Female (F)","M":"Male (M)"}[x],
+    uploaded = st.file_uploader(
+        "Unggah CSV untuk dianalisis", type=["csv"],
+        help="Kolom numerik dapat dipilih sebagai target. Kolom kategori bisa menjadi prediktor/filter.",
     )
-    uploaded = st.file_uploader("Unggah CSV (opsional)", type=["csv"])
-    st.caption("Data unggahan hanya dipakai selama sesi aplikasi.")
-    st.divider()
-    st.caption("Ambang intervensi: Exam Score di bawah 60.")
+    st.caption("File upload hanya digunakan selama sesi aplikasi dan tidak disimpan ke server proyek.")
 
 st.title("Executive BI Dashboard")
-st.caption("Predictive Analytics · Student Performance Intelligence")
+st.caption("Predictive Analytics · Dashboard analitik fleksibel untuk dataset CSV")
 
 try:
     if uploaded is not None:
-        original = prepare_data(pd.read_csv(uploaded))
-        source = "Unggahan CSV"
+        original = read_uploaded_csv(uploaded)
+        source = f"CSV unggahan: {uploaded.name}"
+        data_token = hashlib.sha1(uploaded.getvalue()).hexdigest()[:10]
     else:
         original, source = load_default_data()
+        data_token = "sample"
 except Exception as exc:
     st.error(f"Tidak dapat membaca data: {exc}")
     st.stop()
 
-if original.empty:
-    st.warning("CSV tidak berisi baris data yang valid.")
+if original.empty or len(original.columns) == 0:
+    st.warning("Dataset belum berisi baris dan kolom yang dapat dianalisis.")
     st.stop()
 
-model = fit_ols(original)
-data = original if gender_choice == "Semua" else original[original.Gender == gender_choice]
+# Dataset-aware categorical filter: Gender appears automatically when present,
+# while any other low-cardinality category can be selected for other CSVs.
+filter_options = categorical_columns(original, max_unique=min(100, max(10, len(original))))
+with st.sidebar:
+    if filter_options:
+        preferred_filter = "Gender" if "Gender" in filter_options else None
+        default_index = 1 + filter_options.index(preferred_filter) if preferred_filter else 0
+        filter_column = st.selectbox(
+            "Filter kategori (opsional)", [None, *filter_options], index=default_index,
+            format_func=lambda value: "Tanpa filter" if value is None else label(value),
+            key=f"filter_column_{data_token}",
+        )
+        filter_value = ALL_VALUES
+        if filter_column:
+            category_series = original[filter_column].astype("string").fillna("(Kosong)").astype(str)
+            categories = category_series.value_counts().index.tolist()
+            filter_value = st.selectbox(
+                f"Nilai {label(filter_column)}", [ALL_VALUES, *categories],
+                format_func=lambda value: "Semua nilai" if value == ALL_VALUES else value,
+                key=f"filter_value_{data_token}_{filter_column}",
+            )
+    else:
+        filter_column, filter_value = None, ALL_VALUES
+        st.caption("Dataset ini tidak memiliki kolom kategori untuk filter.")
+
+data = original.copy()
+if filter_column and filter_value != ALL_VALUES:
+    category_series = data[filter_column].astype("string").fillna("(Kosong)").astype(str)
+    data = data[category_series == filter_value].copy()
 if data.empty:
-    st.warning("Tidak ada baris untuk filter gender ini.")
+    st.warning("Filter ini tidak menyisakan baris data. Pilih kategori lain.")
     st.stop()
 
-stats = data.select_dtypes(include="number").mean(numeric_only=True)
-corr = data.select_dtypes(include="number").corr().fillna(0)
-risk_count = int((data.Exam_Score < 60).sum())
-target_corr = corr["Exam_Score"].drop(labels=["Exam_Score"], errors="ignore")
-strongest = target_corr.abs().idxmax() if len(target_corr) else "Study_Hours"
+# Keep widget values separate when an uploaded file or active category subset changes.
+data_token = hashlib.sha1(
+    f"{data_token}:{filter_column}:{filter_value}".encode("utf-8")
+).hexdigest()[:10]
 
-st.info(
-    f"**Insight:** {len(data)} siswa dianalisis dari {source}. "
-    f"Rata-rata nilai ujian **{stats['Exam_Score']:.1f}**; faktor dengan "
-    f"korelasi absolut tertinggi adalah **{LABELS.get(strongest, strongest)}** "
-    f"(r = {target_corr.get(strongest, 0):.2f}). "
-    f"**{risk_count} siswa** berada di bawah skor 60."
-)
+numeric_cols = list(data.select_dtypes(include="number").columns)
+if not numeric_cols:
+    st.warning("Dataset ini belum memiliki kolom numerik. Target prediksi dan korelasi memerlukan kolom numerik.")
+    show_data_table(data, source, data_token)
+    st.stop()
 
-kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-kpi1.metric("Rata-rata Exam Score", f"{stats['Exam_Score']:.1f}", "dari 100")
-kpi2.metric("Rata-rata Study Hours", f"{stats['Study_Hours']:.1f} jam")
-kpi3.metric("Rata-rata Attendance", f"{stats['Attendance']:.1f}%")
-kpi4.metric("Butuh Intervensi", f"{risk_count}", f"dari {len(data)} siswa")
+default_target = choose_default_target(data, numeric_cols)
+with st.container(border=True):
+    control_col, feature_col = st.columns([1, 2], gap="large")
+    with control_col:
+        target = st.selectbox(
+            "Target prediksi (Y)", numeric_cols,
+            index=numeric_cols.index(default_target),
+            format_func=label, key=f"target_{data_token}",
+        )
+    feature_options = [column for column in data.columns if column != target]
+    # High-cardinality string fields are left out of regression candidates so an
+    # accidental ID/name column cannot create thousands of one-hot features.
+    max_category_cardinality = min(50, max(10, int(len(data) * .2)))
+    usable_features = []
+    excluded_categories = []
+    for column in feature_options:
+        if pd.api.types.is_numeric_dtype(data[column]):
+            if data[column].nunique(dropna=True) > 1:
+                usable_features.append(column)
+        else:
+            distinct = data[column].nunique(dropna=True)
+            if 1 < distinct <= max_category_cardinality:
+                usable_features.append(column)
+            elif distinct > max_category_cardinality:
+                excluded_categories.append(column)
 
-st.header("01 · What-If Simulator & Profil Gender")
+    preferred_features = [column for column in STUDENT_FEATURES
+                          if target == "Exam_Score" and column in usable_features]
+    if not preferred_features:
+        preferred_features = [
+            column for column in usable_features
+            if pd.api.types.is_numeric_dtype(data[column]) and not is_identifier(column, data[column])
+        ][:8]
+    if not preferred_features:
+        preferred_features = usable_features[:5]
+
+    with feature_col:
+        features = st.multiselect(
+            "Prediktor model (X)", usable_features, default=preferred_features,
+            format_func=label, key=f"features_{data_token}_{target}",
+            help="Pilih kolom yang ingin digunakan sebagai input simulasi. Kolom kategori akan di-encode otomatis.",
+        )
+if excluded_categories:
+    st.caption("Kolom kategori berkardinalitas tinggi dilewati agar model tidak menghafal ID/nama: "
+               + ", ".join(map(label, excluded_categories)))
+
+model = fit_ols(data, target, features)
+target_values = pd.to_numeric(data[target], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+target_mean = float(target_values.mean()) if not target_values.empty else float("nan")
+target_median = float(target_values.median()) if not target_values.empty else float("nan")
+target_corr = data[numeric_cols].corr()[target].drop(labels=[target], errors="ignore").dropna()
+strongest = target_corr.abs().idxmax() if not target_corr.empty else None
+
+if strongest:
+    insight = (
+        f"**Insight:** {len(data):,} baris dari {source}. Rata-rata **{label(target)}** "
+        f"{fmt(target_mean)}; korelasi numerik absolut terkuat adalah **{label(strongest)}** "
+        f"(r = {target_corr[strongest]:.2f})."
+    )
+else:
+    insight = f"**Insight:** {len(data):,} baris dari {source}; belum ada faktor numerik lain untuk dibandingkan dengan {label(target)}."
+st.info(insight)
+
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Baris yang dianalisis", f"{len(data):,}", f"{len(original.columns)} kolom")
+k2.metric(f"Rata-rata {label(target)}", fmt(target_mean) if np.isfinite(target_mean) else "—")
+k3.metric(f"Median {label(target)}", fmt(target_median) if np.isfinite(target_median) else "—")
+k4.metric("Akurasi model (R²)", f"{model.get('r2', 0) * 100:.2f}%", f"{model.get('n', 0):,} baris latih")
+
+st.header("01 · Simulator What-If & Profil Kelompok")
 sim_col, radar_col = st.columns([1.05, .95], gap="large")
 with sim_col:
-    st.subheader("Simulasikan profil belajar")
-    c1, c2 = st.columns(2)
-    study = c1.slider("Study Hours", 0.0, 20.0, 10.0, .5)
-    attendance = c2.slider("Attendance", 40, 100, 85, 1)
-    sleep = c1.slider("Sleep Hours", 3.0, 12.0, 7.0, .5)
-    screen = c2.slider("Screen Hours", 0.0, 16.0, 6.0, .5)
-    values = dict(zip(FEATURES, [study, attendance, sleep, screen]))
-    contributions = {key: model["coefficients"][key] * val for key, val in values.items()}
-    prediction = float(np.clip(model["intercept"] + sum(contributions.values()), 0, 100))
-    if prediction >= 85:
-        grade = "A · Sangat Baik"
-    elif prediction >= 75:
-        grade = "B · Baik"
-    elif prediction >= 60:
-        grade = "C · Cukup"
+    st.subheader("Simulasikan nilai prediktor")
+    if model.get("error"):
+        st.warning(model["error"])
     else:
-        grade = "D · Perlu Intervensi"
-    st.metric("Estimasi Exam Score", f"{prediction:.1f} / 100", grade)
-    st.caption(f"Model OLS · R² {model['r2'] * 100:.2f}% · {model['n']} observasi")
-    with st.expander("Behind the Scenes · persamaan & rincian"):
-        terms = [f"{model['coefficients'][k]:+.4f} × {k}" for k in FEATURES]
-        st.code(f"Exam_Score = {model['intercept']:.4f} " + " ".join(terms), language="text")
-        parts = pd.DataFrame([
-            {"Komponen": "Intercept", "Nilai input": "—", "Kontribusi": model["intercept"]},
-            *[
-                {"Komponen": LABELS[key], "Nilai input": value,
-                 "Kontribusi": contributions[key]}
-                for key, value in values.items()
-            ],
-            {"Komponen": "Prediksi dibatasi 0–100", "Nilai input": "—",
-             "Kontribusi": prediction},
-        ])
-        st.dataframe(parts, hide_index=True, use_container_width=True)
+        scenario = prediction_controls(data, features, data_token)
+        if features:
+            scenario_frame = pd.DataFrame([scenario])
+            encoded_scenario = encode_features(scenario_frame, features, model["design_columns"])
+            terms = encoded_scenario.iloc[0].to_dict()
+        else:
+            terms = {}
+        contributions = {column: model["coefficients"].get(column, 0.0) * value
+                         for column, value in terms.items()}
+        prediction = model["intercept"] + sum(contributions.values())
+        st.metric(f"Estimasi {label(target)}", fmt(float(prediction)), "prediksi OLS")
+        st.caption(
+            f"Ordinary Least Squares · R² {model['r2'] * 100:.2f}% · "
+            f"{model['n']:,} baris lengkap · {model['design_width']} parameter"
+        )
+        with st.expander("Behind the Scenes · persamaan & rincian"):
+            equation_terms = [f"{coef:+.4f} × {column}" for column, coef in model["coefficients"].items()]
+            equation = f"{target} = {model['intercept']:.4f} " + " ".join(equation_terms)
+            st.code(equation, language="text")
+            breakdown = [
+                {"Komponen": "Intercept", "Nilai input": "—", "Kontribusi": model["intercept"]},
+            ]
+            breakdown.extend([
+                {"Komponen": label(column), "Nilai input / encoding": fmt(float(value), 4),
+                 "Kontribusi": contributions[column]}
+                for column, value in terms.items()
+            ])
+            breakdown.append({"Komponen": f"Estimasi {label(target)}", "Nilai input": "—",
+                              "Kontribusi": prediction})
+            st.dataframe(pd.DataFrame(breakdown), hide_index=True, width="stretch")
+            st.caption("R² adalah hasil pada data yang dipakai untuk melatih model, bukan jaminan akurasi pada data baru.")
+
 with radar_col:
-    st.subheader("Profil Gender")
-    st.caption("Rata-rata metrik dinormalisasi ke skala 0–100.")
-    st.plotly_chart(make_radar(original), use_container_width=True)
+    st.subheader("Profil metrik")
+    radar_metrics = [column for column in numeric_cols if data[column].nunique(dropna=True) > 1]
+    radar_default = [target, *[column for column in radar_metrics if column != target][:4]]
+    metrics = st.multiselect(
+        "Metrik radar", radar_metrics, default=radar_default[:5],
+        format_func=label, key=f"radar_metrics_{data_token}",
+    )
+    radar_groups = [column for column in filter_options
+                    if 2 <= data[column].nunique(dropna=True) <= 8]
+    if radar_groups:
+        preferred_group = filter_column if filter_column in radar_groups else radar_groups[0]
+        group_col = st.selectbox(
+            "Bandingkan kelompok berdasarkan", radar_groups,
+            index=radar_groups.index(preferred_group), format_func=label,
+            key=f"radar_group_{data_token}",
+        )
+        group_values = data[group_col].astype("string").fillna("(Kosong)").astype(str)
+        available_groups = group_values.value_counts().index.tolist()
+        chosen_groups = st.multiselect(
+            "Kelompok yang ditampilkan", available_groups,
+            default=available_groups[:min(3, len(available_groups))],
+            key=f"radar_values_{data_token}_{group_col}",
+        )
+    else:
+        group_col, chosen_groups = None, []
+        st.caption("Tidak ada kolom kategori dengan 2–8 nilai unik; profil menunjukkan keseluruhan data.")
+    st.caption("Rata-rata tiap metrik dinormalisasi 0–100 berdasarkan rentang dataset aktif.")
+    if metrics:
+        st.plotly_chart(make_radar(data, metrics, group_col, chosen_groups), width="stretch")
+    else:
+        st.info("Pilih setidaknya satu kolom numerik untuk radar chart.")
 
 st.header("02 · Analisis Faktor Korelasi Target")
-numeric_cols = list(data.select_dtypes(include="number").columns)
-default_target = "Exam_Score" if "Exam_Score" in numeric_cols else numeric_cols[0]
-target = st.selectbox(
-    "Target (Y)", numeric_cols, index=numeric_cols.index(default_target),
-    format_func=lambda x: LABELS.get(x, x),
-)
-factors = [col for col in numeric_cols if col != target]
-factor_default = "Study_Hours" if "Study_Hours" in factors else factors[0]
-factor = st.selectbox(
-    "Faktor (X) untuk scatter", factors, index=factors.index(factor_default),
-    format_func=lambda x: LABELS.get(x, x),
-)
-corr_y = data[numeric_cols].corr()[target].drop(labels=[target], errors="ignore")
-ranked = corr_y.reindex(corr_y.abs().sort_values(ascending=True).index)
-rank_colors = ["#38bdf8" if val >= 0 else "#fb7185" for val in ranked.values]
+factor_cols = [column for column in numeric_cols if column != target]
 bar_col, scatter_col = st.columns(2, gap="large")
 with bar_col:
-    bar = go.Figure(go.Bar(
-        x=ranked.values, y=[LABELS.get(x, x) for x in ranked.index],
-        orientation="h", marker_color=rank_colors,
-        hovertemplate="%{y}<br>r = %{x:.3f}<extra></extra>",
-    ))
-    bar.update_layout(
-        template="plotly_dark", title=f"Ranking korelasi terhadap {LABELS.get(target,target)}",
-        xaxis={"range":[-1,1],"title":"Korelasi Pearson","gridcolor":"#334155"},
-        yaxis={"gridcolor":"rgba(0,0,0,0)"}, height=390,
-        paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
-        margin={"l":10,"r":15,"t":60,"b":35},
-    )
-    st.plotly_chart(bar, use_container_width=True)
+    if factor_cols:
+        correlations = data[numeric_cols].corr()[target].drop(labels=[target], errors="ignore").fillna(0)
+        ranked = correlations.reindex(correlations.abs().sort_values(ascending=True).index)
+        colors = ["#38bdf8" if value >= 0 else "#fb7185" for value in ranked.values]
+        bar = go.Figure(go.Bar(
+            x=ranked.values, y=[label(column) for column in ranked.index],
+            orientation="h", marker_color=colors,
+            hovertemplate="%{y}<br>r = %{x:.3f}<extra></extra>",
+        ))
+        bar.update_layout(
+            template="plotly_dark", title=f"Ranking korelasi terhadap {label(target)}",
+            xaxis={"range": [-1, 1], "title": "Korelasi Pearson", "gridcolor": "#334155"},
+            yaxis={"gridcolor": "rgba(0,0,0,0)"}, height=max(360, 35 * len(ranked)),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            margin={"l": 10, "r": 15, "t": 60, "b": 35},
+        )
+        st.plotly_chart(bar, width="stretch")
+    else:
+        st.info("Dibutuhkan setidaknya dua kolom numerik untuk analisis korelasi.")
+
 with scatter_col:
-    scatter = go.Figure(go.Scatter(
-        x=data[factor], y=data[target], mode="markers",
-        marker={"color":"#22d3ee","opacity":.78,"size":9},
-        text=data.Student_ID.astype(str),
-        hovertemplate="Student ID %{text}<br>%{xaxis.title.text}: %{x}<br>%{yaxis.title.text}: %{y}<extra></extra>",
-    ))
-    scatter.update_layout(
-        template="plotly_dark",
-        xaxis={"title":LABELS.get(factor,factor),"gridcolor":"#334155"},
-        yaxis={"title":LABELS.get(target,target),"gridcolor":"#334155"},
-        height=390,paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
-        margin={"l":10,"r":15,"t":25,"b":35},
-    )
-    st.plotly_chart(scatter, use_container_width=True)
+    if factor_cols:
+        default_factor = "Study_Hours" if "Study_Hours" in factor_cols else factor_cols[0]
+        factor = st.selectbox(
+            "Faktor (X) untuk scatter", factor_cols,
+            index=factor_cols.index(default_factor), format_func=label,
+            key=f"scatter_factor_{data_token}_{target}",
+        )
+        scatter = go.Figure(go.Scatter(
+            x=data[factor], y=data[target], mode="markers",
+            marker={"color": "#22d3ee", "opacity": .78, "size": 9},
+            customdata=np.arange(len(data)),
+            hovertemplate=f"{label(factor)}: %{{x}}<br>{label(target)}: %{{y}}<extra></extra>",
+        ))
+        valid_xy = data[[factor, target]].apply(pd.to_numeric, errors="coerce").dropna()
+        if len(valid_xy) >= 2 and valid_xy[factor].nunique() > 1:
+            slope, intercept = np.polyfit(valid_xy[factor].to_numpy(), valid_xy[target].to_numpy(), 1)
+            x_line = np.linspace(float(valid_xy[factor].min()), float(valid_xy[factor].max()), 50)
+            scatter.add_trace(go.Scatter(
+                x=x_line, y=slope * x_line + intercept, mode="lines", name="Tren linear",
+                line={"color": "#fbbf24", "dash": "dash"},
+                hovertemplate="Garis tren<extra></extra>",
+            ))
+        scatter.update_layout(
+            template="plotly_dark", xaxis={"title": label(factor), "gridcolor": "#334155"},
+            yaxis={"title": label(target), "gridcolor": "#334155"},
+            height=390, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            margin={"l": 10, "r": 15, "t": 25, "b": 35},
+        )
+        st.plotly_chart(scatter, width="stretch")
+    else:
+        st.info("Belum ada faktor numerik lain untuk scatter plot.")
 
 st.header("03 · Matriks Korelasi & Tabel Data")
-heat_corr = data[numeric_cols].corr().fillna(0)
-heat = go.Figure(go.Heatmap(
-    z=heat_corr.values,
-    x=[LABELS.get(c,c) for c in numeric_cols],
-    y=[LABELS.get(c,c) for c in numeric_cols],
-    colorscale=[[0,"#fb7185"],[.5,"#1e293b"],[1,"#38bdf8"]],
-    zmin=-1,zmax=1,text=np.round(heat_corr.values,2),texttemplate="%{text:.2f}",
-    hovertemplate="%{y} × %{x}<br>r = %{z:.3f}<extra></extra>",
-    colorbar={"title":"r"},
-))
-heat.update_layout(
-    template="plotly_dark",height=max(430,35*len(numeric_cols)),
-    paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
-    margin={"l":15,"r":15,"t":20,"b":20},
-)
-st.plotly_chart(heat, use_container_width=True)
+if len(numeric_cols) >= 2:
+    corr_matrix = data[numeric_cols].corr().replace([np.inf, -np.inf], np.nan).fillna(0)
+    heat = go.Figure(go.Heatmap(
+        z=corr_matrix.values,
+        x=[label(column) for column in numeric_cols],
+        y=[label(column) for column in numeric_cols],
+        colorscale=[[0, "#fb7185"], [.5, "#1e293b"], [1, "#38bdf8"]],
+        zmin=-1, zmax=1, text=np.round(corr_matrix.values, 2), texttemplate="%{text:.2f}",
+        hovertemplate="%{y} × %{x}<br>r = %{z:.3f}<extra></extra>",
+        colorbar={"title": "r"},
+    ))
+    heat.update_layout(
+        template="plotly_dark", height=max(430, 35 * len(numeric_cols)),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        margin={"l": 15, "r": 15, "t": 20, "b": 20},
+    )
+    st.plotly_chart(heat, width="stretch")
+else:
+    st.info("Matriks korelasi membutuhkan setidaknya dua kolom numerik.")
 
-st.subheader("Tabel Data Interaktif")
-search = st.text_input("Cari siswa atau nilai", placeholder="Ketik kata kunci...")
-display_data = data.copy()
-if search:
-    mask = display_data.astype(str).apply(
-        lambda column: column.str.contains(search, case=False, regex=False)
-    ).any(axis=1)
-    display_data = display_data[mask]
-st.caption(f"{len(display_data)} dari {len(data)} baris ditampilkan · sumber: {source}")
-st.dataframe(display_data, hide_index=True, use_container_width=True)
-csv_bytes = display_data.to_csv(index=False).encode("utf-8-sig")
-st.download_button(
-    "Unduh CSV hasil filter", data=csv_bytes, file_name="student_bi_dashboard.csv",
-    mime="text/csv",
-)
+show_data_table(data, source, data_token)

@@ -1,15 +1,17 @@
 # Executive BI Dashboard — Streamlit
 
-Aplikasi dashboard analisis dan prediksi performa siswa berbasis Streamlit.
+Aplikasi dashboard analitik dan prediksi berbasis CSV. Data siswa hanya menjadi dataset contoh; unggah CSV lain untuk mengganti metrik, prediktor, simulator, korelasi, heatmap, dan tabel secara otomatis.
 
 ## Isi folder
 
-- streamlit_app.py — aplikasi utama Streamlit.
+- streamlit_app.py — aplikasi utama Streamlit dengan model OLS generik.
 - student_data.js — data latihan dalam JavaScript; payload CSV dikompres dengan gzip lalu Base64.
 - convert_csv_to_js.py — converter CSV menjadi student_data.js.
 - requirements.txt — dependensi untuk lokal dan Streamlit Community Cloud.
 
-CSV asli tidak perlu dimasukkan ke repository. Aplikasi mendahulukan student_data.js, tetap menerima unggahan CSV di sidebar, dan membuat data dummy jika file data tidak tersedia.
+CSV asli tidak perlu dimasukkan ke repository. Aplikasi mendahulukan student_data.js sebagai data contoh dan membuat data dummy jika file itu tidak tersedia. CSV yang diunggah tidak perlu memiliki nama kolom khusus: pilih satu kolom numerik sebagai target, pilih prediktor numerik/kategori, lalu simulator dan semua analisis mengikuti dataset aktif. Kolom kategori berkardinalitas tinggi otomatis dilewati dari kandidat prediktor untuk mencegah ID/nama membuat model terlalu besar.
+
+Unggahan hanya dipakai selama sesi aplikasi. Korelasi dan model memerlukan kolom target numerik; kolom kategori dapat dipakai sebagai filter atau prediktor.
 
 ## Perbarui data JavaScript
 
