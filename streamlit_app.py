@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
-import base64
-import gzip
 import hashlib
 import io
-import json
 import re
 
 import numpy as np
@@ -14,16 +10,6 @@ import plotly.graph_objects as go
 import streamlit as st
 
 
-BASE_DIR = Path(__file__).resolve().parent
-CSV_CANDIDATES = [
-    BASE_DIR / "latihan1.csv",
-    Path(r"D:\MataKuliah\makul semester 5\business intelegensi\latihan1.csv"),
-]
-STUDENT_COLUMNS = [
-    "Student_ID", "Gender", "Age", "Study_Hours", "Sleep_Hours",
-    "Attendance", "Exam_Score", "Monthly_Spending", "Screen_Hours",
-    "Satisfaction",
-]
 STUDENT_FEATURES = ["Study_Hours", "Attendance", "Sleep_Hours", "Screen_Hours"]
 ALL_VALUES = "__ALL_VALUES__"
 MISSING_VALUE = "__MISSING_VALUE__"
@@ -50,32 +36,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-
-def generate_dummy_data(rows: int = 100) -> pd.DataFrame:
-    """Create the original student example used when no source file exists."""
-    rng = np.random.default_rng(42)
-    gender = rng.choice(["F", "M"], size=rows)
-    age = rng.integers(17, 25, rows)
-    study = np.clip(rng.normal(10, 3.2, rows), 1, 20).round(1)
-    sleep = np.clip(rng.normal(7, 1.1, rows), 3.5, 10).round(1)
-    attendance = np.clip(rng.normal(84, 10, rows), 50, 100).round(1)
-    screen = np.clip(rng.normal(6.2, 2, rows), 1, 14).round(1)
-    exam = np.clip(
-        18 + 2.6 * study + .36 * attendance + 1.45 * sleep
-        - 1.35 * screen + rng.normal(0, 2.2, rows), 0, 100
-    ).round(1)
-    spending = np.clip(rng.normal(1100, 420, rows), 250, 3000).round().astype(int)
-    satisfaction = np.clip(
-        2 + .055 * exam + .24 * sleep - .10 * screen
-        + rng.normal(0, .8, rows), 1, 10
-    ).round(1)
-    return pd.DataFrame({
-        "Student_ID": np.arange(1, rows + 1), "Gender": gender, "Age": age,
-        "Study_Hours": study, "Sleep_Hours": sleep, "Attendance": attendance,
-        "Exam_Score": exam, "Monthly_Spending": spending,
-        "Screen_Hours": screen, "Satisfaction": satisfaction,
-    }, columns=STUDENT_COLUMNS)
 
 
 def prepare_data(frame: pd.DataFrame) -> pd.DataFrame:
@@ -111,27 +71,6 @@ def read_uploaded_csv(uploaded_file) -> pd.DataFrame:
         except Exception as exc:  # Try the next likely encoding before reporting.
             errors.append(exc)
     raise ValueError(f"CSV tidak dapat dibaca. Periksa delimiter dan isinya. ({errors[-1]})")
-
-
-def read_js_data(path: Path) -> pd.DataFrame:
-    """Decode the gzip+Base64 CSV stored by convert_csv_to_js.py."""
-    text = path.read_text(encoding="utf-8").strip()
-    prefix = "window.STUDENT_DATA_GZIP_B64 = "
-    if not text.startswith(prefix) or not text.endswith(";"):
-        raise ValueError("Format student_data.js tidak dikenali.")
-    encoded = json.loads(text[len(prefix):-1])
-    csv_bytes = gzip.decompress(base64.b64decode(encoded))
-    return prepare_data(pd.read_csv(io.BytesIO(csv_bytes)))
-
-
-def load_default_data() -> tuple[pd.DataFrame, str]:
-    js_path = BASE_DIR / "student_data.js"
-    if js_path.is_file():
-        return read_js_data(js_path), f"Data contoh ({js_path.name})"
-    for path in CSV_CANDIDATES:
-        if path.is_file():
-            return prepare_data(pd.read_csv(path)), f"Data contoh ({path.name})"
-    return generate_dummy_data(), "Data dummy otomatis (100 baris)"
 
 
 def label(column: str) -> str:
@@ -297,6 +236,89 @@ def make_radar(frame: pd.DataFrame, metrics: list[str], group_col: str | None,
     return fig
 
 
+def make_regression_3d(frame: pd.DataFrame, target: str, features: list[str],
+                       model: dict, x_feature: str, y_feature: str) -> go.Figure:
+    """Show observations and the OLS prediction plane for two numeric predictors.
+
+    Any other selected predictors are held at their median (numeric) or most
+    frequent value (categorical), so the surface remains a true slice of the
+    full multiple-regression model.
+    """
+    numeric = frame[[x_feature, y_feature, target]].apply(pd.to_numeric, errors="coerce")
+    numeric = numeric.replace([np.inf, -np.inf], np.nan).dropna()
+    if numeric.empty:
+        return go.Figure()
+
+    x_values = numeric[x_feature].to_numpy(dtype=float)
+    y_values = numeric[y_feature].to_numpy(dtype=float)
+    x_min, x_max = float(np.min(x_values)), float(np.max(x_values))
+    y_min, y_max = float(np.min(y_values)), float(np.max(y_values))
+    # A constant predictor cannot form a two-dimensional surface.
+    if x_min == x_max or y_min == y_max:
+        return go.Figure()
+
+    x_grid, y_grid = np.meshgrid(
+        np.linspace(x_min, x_max, 28), np.linspace(y_min, y_max, 28)
+    )
+    grid_size = x_grid.size
+    scenario = pd.DataFrame(index=range(grid_size))
+    for feature in features:
+        series = frame[feature]
+        if pd.api.types.is_numeric_dtype(series):
+            valid = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+            baseline = float(valid.median()) if not valid.empty else 0.0
+        else:
+            categories = series.astype("string").fillna("(Kosong)").astype(str).mode()
+            baseline = categories.iloc[0] if not categories.empty else "(Kosong)"
+        scenario[feature] = baseline
+    scenario[x_feature] = x_grid.ravel()
+    scenario[y_feature] = y_grid.ravel()
+
+    encoded = encode_features(scenario, features, model["design_columns"])
+    coefficients = np.array(
+        [model["coefficients"].get(column, 0.0) for column in model["design_columns"]],
+        dtype=float,
+    )
+    z_grid = (model["intercept"] + encoded.to_numpy(dtype=float) @ coefficients).reshape(x_grid.shape)
+
+    fig = go.Figure()
+    fig.add_trace(go.Surface(
+        x=x_grid, y=y_grid, z=z_grid, name="Permukaan prediksi OLS",
+        colorscale="Viridis", opacity=.72, showscale=True,
+        colorbar={"title": label(target)},
+        hovertemplate=(f"{label(x_feature)}: %{{x:.2f}}<br>"
+                       f"{label(y_feature)}: %{{y:.2f}}<br>"
+                       f"Prediksi {label(target)}: %{{z:.2f}}<extra></extra>"),
+    ))
+    fig.add_trace(go.Scatter3d(
+        x=x_values, y=y_values, z=numeric[target].to_numpy(dtype=float),
+        mode="markers", name="Data aktual",
+        marker={"size": 4, "color": numeric[target].to_numpy(dtype=float),
+                "colorscale": "Turbo", "opacity": .85,
+                "colorbar": {"title": f"Aktual {label(target)}", "x": 1.08}},
+        hovertemplate=(f"{label(x_feature)}: %{{x:.2f}}<br>"
+                       f"{label(y_feature)}: %{{y:.2f}}<br>"
+                       f"Aktual {label(target)}: %{{z:.2f}}<extra></extra>"),
+    ))
+    fig.update_layout(
+        template="plotly_dark", height=620,
+        title=f"Permukaan OLS 3D · R² {model['r2'] * 100:.2f}%",
+        scene={
+            "xaxis_title": label(x_feature),
+            "yaxis_title": label(y_feature),
+            "zaxis_title": label(target),
+            "bgcolor": "rgba(0,0,0,0)",
+            "xaxis": {"gridcolor": "#334155"},
+            "yaxis": {"gridcolor": "#334155"},
+            "zaxis": {"gridcolor": "#334155"},
+        },
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        margin={"l": 10, "r": 25, "t": 65, "b": 10},
+        legend={"orientation": "h", "y": -0.05},
+    )
+    return fig
+
+
 def fmt(value: float, digits: int = 2) -> str:
     return f"{value:,.{digits}f}"
 
@@ -381,14 +403,24 @@ with st.sidebar:
 st.title("Executive BI Dashboard")
 st.caption("Predictive Analytics · Dashboard analitik fleksibel untuk dataset CSV")
 
+if uploaded is None:
+    st.header("Mulai dengan mengunggah file CSV")
+    st.info(
+        "Dashboard tidak memuat atau menampilkan dataset contoh. Unggah CSV melalui panel di kiri; "
+        "setelah file tersedia, pilih target dan prediktor untuk membuka simulasi, grafik, "
+        "analisis korelasi, dan tabel data."
+    )
+    st.markdown(
+        "**Format yang didukung:** file `.csv` dengan baris pertama sebagai nama kolom. "
+        "Untuk prediksi dan korelasi, sertakan minimal satu kolom numerik; visualisasi "
+        "regresi 3D memerlukan target dan dua prediktor numerik."
+    )
+    st.stop()
+
 try:
-    if uploaded is not None:
-        original = read_uploaded_csv(uploaded)
-        source = f"CSV unggahan: {uploaded.name}"
-        data_token = hashlib.sha1(uploaded.getvalue()).hexdigest()[:10]
-    else:
-        original, source = load_default_data()
-        data_token = "sample"
+    original = read_uploaded_csv(uploaded)
+    source = f"CSV unggahan: {uploaded.name}"
+    data_token = hashlib.sha1(uploaded.getvalue()).hexdigest()[:10]
 except Exception as exc:
     st.error(f"Tidak dapat membaca data: {exc}")
     st.stop()
@@ -581,6 +613,42 @@ with radar_col:
         st.plotly_chart(make_radar(data, metrics, group_col, chosen_groups), width="stretch")
     else:
         st.info("Pilih setidaknya satu kolom numerik untuk radar chart.")
+
+st.subheader("Regresi Linear Berganda · Visualisasi 3D")
+numeric_predictors = [
+    column for column in features
+    if column != target and pd.api.types.is_numeric_dtype(data[column])
+    and data[column].nunique(dropna=True) > 1
+]
+if model.get("error"):
+    st.info("Pilih prediktor dan pastikan tersedia baris lengkap untuk membangun model 3D.")
+elif len(numeric_predictors) < 2:
+    st.info(
+        "Pilih minimal dua prediktor numerik pada bagian Prediktor model (X). "
+        "Prediktor kategorikal tetap dapat dipakai model, tetapi tidak dapat menjadi sumbu 3D."
+    )
+else:
+    axis_x_col, axis_y_col = st.columns(2)
+    with axis_x_col:
+        axis_x = st.selectbox(
+            "Sumbu X", numeric_predictors, index=0, format_func=label,
+            key=f"reg3d_x_{data_token}_{target}",
+        )
+    y_options = [column for column in numeric_predictors if column != axis_x]
+    with axis_y_col:
+        axis_y = st.selectbox(
+            "Sumbu Y", y_options, index=0, format_func=label,
+            key=f"reg3d_y_{data_token}_{target}_{axis_x}",
+        )
+    regression_3d = make_regression_3d(data, target, features, model, axis_x, axis_y)
+    if regression_3d.data:
+        st.plotly_chart(regression_3d, width="stretch")
+        st.caption(
+            "Titik menunjukkan observasi aktual, sedangkan permukaan menunjukkan prediksi OLS. "
+            "Prediktor lain yang dipilih ditahan pada median (numerik) atau kategori paling umum."
+        )
+    else:
+        st.info("Tidak dapat membentuk permukaan: kedua prediktor harus memiliki nilai bervariasi.")
 
 st.header("02 · Analisis Faktor Korelasi Target")
 factor_cols = [column for column in numeric_cols if column != target]
